@@ -3,19 +3,24 @@
 import datetime
 from unittest import TestCase
 
-from mongoengine import connect, disconnect
+import mongomock
+from mongoengine import connect as _connect, disconnect
 
-from cursor_pagination import CursorPaginator, InvalidCursor
+from cursor_pagination import CursorPaginator
 from .models import Author, Post
+
+
+def connect():
+    _connect("mongoenginetest", mongo_client_class=mongomock.MongoClient)
 
 
 class TestNoArgs(TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
-        connect("mongoenginetest", host="mongomock://localhost")
+    def setUpClass(cls):
+        connect()
 
     @classmethod
-    def tearDownClass(cls) -> None:
+    def tearDownClass(cls):
         disconnect()
 
     def test_empty(self):
@@ -38,10 +43,9 @@ class TestNoArgs(TestCase):
 class TestForwardPagination(TestCase):
 
     @classmethod
-    def setUpClass(cls) -> None:
-        connect("mongoenginetest", host="mongomock://localhost")
-        now = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
-
+    def setUpClass(cls):
+        connect()
+        now = datetime.datetime.now(datetime.timezone.utc)
         cls.items = []
         for i in range(20):
             post = Post.objects.create(name='Name %s' % i, created=now - datetime.timedelta(hours=i))
@@ -49,8 +53,14 @@ class TestForwardPagination(TestCase):
         cls.paginator = CursorPaginator(Post.objects.all(), ('-created',))
 
     @classmethod
-    def tearDownClass(cls) -> None:
+    def tearDownClass(cls):
         disconnect()
+
+    def test_first_page_zero(self):
+        page = self.paginator.page(first=0)
+        self.assertSequenceEqual(page, [])
+        self.assertTrue(page.has_next)
+        self.assertFalse(page.has_previous)
 
     def test_first_page(self):
         page = self.paginator.page(first=2)
@@ -86,9 +96,10 @@ class TestForwardPagination(TestCase):
 class TestBackwardsPagination(TestCase):
 
     @classmethod
-    def setUpClass(cls) -> None:
-        connect("mongoenginetest", host="mongomock://localhost")
-        now = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+    def setUpClass(cls):
+        connect()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
         cls.items = []
         for i in range(20):
             post = Post.objects.create(name='Name %s' % i, created=now - datetime.timedelta(hours=i))
@@ -96,8 +107,14 @@ class TestBackwardsPagination(TestCase):
         cls.paginator = CursorPaginator(Post.objects.all(), ('-created',))
 
     @classmethod
-    def tearDownClass(cls) -> None:
+    def tearDownClass(cls):
         disconnect()
+
+    def test_first_page_zero(self):
+        page = self.paginator.page(last=0)
+        self.assertSequenceEqual(page, [])
+        self.assertTrue(page.has_previous)
+        self.assertFalse(page.has_next)
 
     def test_first_page(self):
         page = self.paginator.page(last=2)
@@ -133,9 +150,10 @@ class TestBackwardsPagination(TestCase):
 class TestTwoFieldPagination(TestCase):
 
     @classmethod
-    def setUpClass(cls) -> None:
-        connect("mongoenginetest", host="mongomock://localhost")
-        now = datetime.datetime.utcnow().replace(tzinfo=datetime.timezone.utc)
+    def setUpClass(cls):
+        connect()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
         cls.items = []
         data = [
             (now, 'B 横浜市'),
@@ -148,7 +166,7 @@ class TestTwoFieldPagination(TestCase):
             cls.items.append(post)
 
     @classmethod
-    def tearDownClass(cls) -> None:
+    def tearDownClass(cls):
         disconnect()
 
     def test_order(self):
@@ -168,31 +186,123 @@ class TestTwoFieldPagination(TestCase):
         self.assertSequenceEqual(page, [self.items[1], self.items[0]])
 
     def test_mixed_order(self):
-        with self.assertRaises(InvalidCursor):
-            CursorPaginator(Post.objects.all(), ('created', '-name'))
+        paginator = CursorPaginator(Post.objects.all(), ('created', '-name'))
+        previous_page = paginator.page(first=2)
+        self.assertSequenceEqual(previous_page, [self.items[2], self.items[1]])
+        cursor = paginator.cursor(previous_page[-1])
+        page = paginator.page(first=2, after=cursor)
+        self.assertSequenceEqual(page, [self.items[0], self.items[3]])
 
 
-class TestRelationships(TestCase):
+class TestNoArgsWithNull(TestCase):
     @classmethod
-    def setUpClass(cls) -> None:
-        connect("mongoenginetest", host="mongomock://localhost")
+    def setUpClass(cls):
+        connect()
+
+    @classmethod
+    def tearDownClass(cls):
+        disconnect()
+
+    def test_with_items(self):
+        authors = [
+            Author.objects.create(name='Alice', age=30),
+            Author.objects.create(name='Bob', age=None),
+            Author.objects.create(name='Carol', age=None),
+            Author.objects.create(name='Dave', age=40)
+        ]
+        paginator = CursorPaginator(Author.objects.all(), ('-age', 'id',))
+        page = paginator.page()
+        self.assertSequenceEqual(page, [authors[3], authors[0], authors[1], authors[2]])
+        self.assertFalse(page.has_next)
+        self.assertFalse(page.has_previous)
+
+
+class TestForwardNullPagination(TestCase):
+    # When there are NULL values, there needs to be another key to make the sort
+    # unique as README Caveats say
+    @classmethod
+    def setUpClass(cls):
+        connect()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
         cls.items = []
-        author_1 = Author.objects.create(name='Ana')
-        author_2 = Author.objects.create(name='Bob')
-        for i in range(20):
-            post = Post.objects.create(name='Name %02d' % i, author=author_1 if i % 2 else author_2)
-            cls.items.append(post)
-        cls.paginator = CursorPaginator(Post.objects.all(), ('author__name', 'name'))
+        for i in range(2):  # index 0-1
+            author = Author.objects.create(name='Name %s' % i, age=i + 20, created=now - datetime.timedelta(hours=i))
+            cls.items.append(author)
+        for i in range(5):  # index 2-6
+            author = Author.objects.create(name='NameNull %s' % (i + 2), age=None,
+                                           created=now - datetime.timedelta(hours=i))
+            cls.items.append(author)
+        cls.paginator = CursorPaginator(Author.objects.all(), ('-age', '-created',))
+
+    # [1, 0, 2, 3, 4, 5, 6]
 
     @classmethod
-    def tearDownClass(cls) -> None:
+    def tearDownClass(cls):
         disconnect()
 
     def test_first_page(self):
-        page = self.paginator.page(first=2)
-        self.assertSequenceEqual(page, [self.items[1], self.items[3]])
+        page = self.paginator.page(first=3)
+        self.assertSequenceEqual(page, [self.items[1], self.items[0], self.items[2]])
+        self.assertTrue(page.has_next)
+        self.assertFalse(page.has_previous)
 
-    def test_after_page(self):
-        cursor = self.paginator.cursor(self.items[17])
+    def test_second_page(self):
+        previous_page = self.paginator.page(first=3)
+        cursor = self.paginator.cursor(previous_page[-1])
         page = self.paginator.page(first=2, after=cursor)
-        self.assertSequenceEqual(page, [self.items[19], self.items[0]])
+        self.assertSequenceEqual(page, [self.items[3], self.items[4]])
+        self.assertTrue(page.has_next)
+        self.assertTrue(page.has_previous)
+
+    def test_last_page(self):
+        previous_page = self.paginator.page(first=5)
+        cursor = self.paginator.cursor(previous_page[-1])
+        page = self.paginator.page(first=10, after=cursor)
+        self.assertSequenceEqual(page, [self.items[5], self.items[6]])
+        self.assertFalse(page.has_next)
+        self.assertTrue(page.has_previous)
+
+
+class TestBackwardsNullPagination(TestCase):
+    @classmethod
+    def setUpClass(cls):
+        connect()
+
+        now = datetime.datetime.now(datetime.timezone.utc)
+        cls.items = []
+        for i in range(2):  # index 0-1
+            author = Author.objects.create(name='Name %s' % i, age=i + 20, created=now - datetime.timedelta(hours=i))
+            cls.items.append(author)
+        for i in range(5):  # index 2-6
+            author = Author.objects.create(name='NameNull %s' % (i + 2), age=None,
+                                           created=now - datetime.timedelta(hours=i))
+            cls.items.append(author)
+        cls.paginator = CursorPaginator(Author.objects.all(), ('-age', '-created',))
+        # => [1, 0, 2, 3, 4, 5, 6]
+
+    @classmethod
+    def tearDownClass(cls):
+        disconnect()
+
+    def test_first_page(self):
+        page = self.paginator.page(last=2)
+        self.assertSequenceEqual(page, [self.items[5], self.items[6]])
+        self.assertTrue(page.has_previous)
+        self.assertFalse(page.has_next)
+
+    def test_second_page(self):
+        previous_page = self.paginator.page(last=2)
+        cursor = self.paginator.cursor(previous_page[0])
+        page = self.paginator.page(last=4, before=cursor)
+        self.assertSequenceEqual(page, [self.items[0], self.items[2], self.items[3], self.items[4]])
+        self.assertTrue(page.has_previous)
+        self.assertTrue(page.has_next)
+
+    def test_last_page(self):
+        previous_page = self.paginator.page(last=6)
+        cursor = self.paginator.cursor(previous_page[0])
+        page = self.paginator.page(last=10, before=cursor)
+        self.assertSequenceEqual(page, [self.items[1]])
+        self.assertFalse(page.has_previous)
+        self.assertTrue(page.has_next)

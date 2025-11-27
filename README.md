@@ -5,10 +5,13 @@
 it compatible with mongoengine instead of django. Currently, there is
 no intention to merge it back into the original project.
 
-This version **only** supports **one field pagination!**
-
-This project may be unstable so be sure to pin the specific commit-hash
+This fork may be unstable so be sure to pin the specific commit-hash
 if you don't like surprises. 
+
+Differences to original project:
+* No `apage()` -> `mongoengine` is sync only
+* No `_nulls_ordering` -> mongoengine doesn't offer customizing the
+  no-data sort order. 
 
 --------
 
@@ -68,6 +71,19 @@ def posts_api(request, after=None):
         'last_cursor': paginator.cursor(page[-1])
     }
     return data
+
+
+async def posts_api_async(request, after=None):
+    qs = Post.objects.all()
+    page_size = 10
+    paginator = CursorPaginator(qs, ordering=('-created', '-id'))
+    page = await paginator.apage(first=page_size, after=after)
+    data = {
+        'objects': [serialize_page(p) for p in page],
+        'has_next_page': page.has_next,
+        'last_cursor': paginator.cursor(page[-1])
+    }
+    return data
 ```
 
 Reverse pagination can be achieved by using the `last` and `before` arguments
@@ -77,8 +93,7 @@ Caveats
 -------
 
 - The ordering specified **must** uniquely identify the object.
-- If there are multiple ordering fields, then they must all have the same
-  direction.
 - If a cursor is given and it does not refer to a valid object, the values of
   `has_previous` (for `after`) or `has_next` (for `before`) will always return
   `True`.
+- `NULL` comes at the end in query results with `ORDER BY` both for `ASC` and `DESC`.
