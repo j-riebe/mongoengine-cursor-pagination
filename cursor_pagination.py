@@ -93,11 +93,15 @@ class CursorPaginator(object):
     def apply_cursor(self, cursor: str, queryset: QuerySet, from_last, reverse: bool = False):
         position = self.decode_cursor(cursor)
 
+        # Edit: The explanation below is adapted from the django implementation because
+        #       MongoDB treats null values as the smallest entities during sorting.
+        #       The reasoning for multi-field sorting originates from the django implementation.
+        # --------------------------------------------------------------------------------------
         # this was previously implemented as tuple comparison done on postgres side
         # Assume comparing 3-tuples a and b,
         # the comparison a < b is equivalent to:
         # (a.0 < b.0) || (a.0 == b.0 && (a.1 < b.1)) || (a.0 == b.0 && a.1 == b.1 && (a.2 < b.2))
-        # The expression above does not depend on short-circuit evalution support,
+        # The expression above does not depend on short-circuit evaluation support,
         # which is usually unavailable on backend RDB
 
         # In order to reflect that in DB query,
@@ -107,22 +111,26 @@ class CursorPaginator(object):
         # (note negation 2nd item),
         # and corresponding cursor values are ("value1", "value2", "value3"),
         # `reverse` is False.
-        # In order to apply cursor, we need to generate a following WHERE-clause:
+        # Keep in mind, NULL is considered the first part of each field's order (in django implementation it's last).
+        # -> everytime the pagination direction (reverse) mismatches the sort direction (is_reversed),
+        # the null values need to be included explicitly in the filter.
+        # In order to apply the cursor, we need to generate a following $match-clause:
 
-        # WHERE ((field1 < value1 OR field1 IS NULL) OR
-        #     (field1 = value1 AND (field2 > value2 OR field2 IS NULL)) OR
-        #     (field1 = value1 AND field2 = value2 AND (field3 < value3 IS NULL)).
+        # $match: {$or: [
+        #   {field1: {$gt: value1}},
+        #   {field1: value1, {field2: {$or: [{$lt: value2}, {$eq: null}]}},
+        #   {field1: value1, field2: value2, {field3: {$gt: value3}}
+        # ]}
         #
-        # Keep in mind, NULL is considered the last part of each field's order.
         # We will use `__lt` lookup for `<`,
         # `__gt` for `>` and `__exact` for `=`.
         # (Using case-sensitive comparison as long as
         # cursor values come from the DB against which it is going to be compared).
-        # The corresponding django ORM construct would look like:
+        # The corresponding mongoengine ODM construct would look like:
         # filter(
-        #     Q(field1__lt=Value(value1) OR field1__isnull=True) |
-        #     Q(field1__exact=Value(value1), (Q(field2__gt=Value(value2) | Q(field2__isnull=True)) |
-        #     Q(field1__exact=Value(value1), field2__exact=Value(value2), (Q(field3__lt=Value(value3) | Q(field3__isnull=True)))
+        #     Q(field1__gt=value1) |
+        #     Q(field1__exact=value1, (Q(field2__lt=value2 | Q(field2=None)) |
+        #     Q(field1__exact=value1, field2__exact=value2, (Q(field3__lt=value3))
         # )
 
         # In order to remember which keys we need to compare for equality on the next iteration,
@@ -140,23 +148,33 @@ class CursorPaginator(object):
         for ordering, value in zip(self.ordering, position):
             is_reversed = ordering.startswith('-')
             o = ordering.lstrip('-')
+            # mongoengine cast query parameters to field types -> NULL values are only allowed for nullable fields
+            field_is_nullable = getattr(queryset._document, o).null
+
             if value is None:  # cursor value for the key was NULL
-                if from_last is True:  # if from_last & cursor value is NULL, we need to get non Null for the key
+                if not field_is_nullable:
+                    raise InvalidCursor(self.invalid_cursor_message)
+
+                # if (forwards pagination and ascending) or (backwards pagination and descending)
+                # we need to get non-Null for the key (NULL is first element in result order)
+                if reverse == is_reversed:
                     q = {f"{o}__ne": None}
                     q.update(q_equality)
                     filtering |= Q(**q)
 
                 q_equality.update({o: None})
-            else:  # cursor value for the key was non NULL
+            else:  # cursor value for the key was non-NULL
                 if reverse != is_reversed:
                     comparison_key = f"{o}__lt"
                 else:
                     comparison_key = f"{o}__gt"
 
                 q = Q(**{comparison_key: value})
-                if not from_last:  # if not from_last, NULL values are still candidates
+                # if (forwards pagination and descending) or (backwards pagination and ascending)
+                # NULL values are still candidates
+                if field_is_nullable and reverse != is_reversed:
                      q |= Q(**{o: None})
-                filtering |= (q) & Q(**q_equality)
+                filtering |= q & Q(**q_equality)
 
                 equality_key = f"{o}__exact"
                 q_equality.update({equality_key: value})
