@@ -13,6 +13,10 @@ Differences to original project:
 * No `_nulls_ordering` -> mongoengine doesn't offer customizing the
   no-data sort order. 
 
+Todo: Missing tests for
+* non-nullable field handling
+* demonstrating that original implementation doesn't handle all sort-order vs. pagination direction cases correctly
+
 --------
 
 _From the original project:_
